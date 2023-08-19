@@ -1,0 +1,68 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+# Imports
+
+```{python}
+import pandas as pd
+```
+
+# Config
+
+```{python}
+INPUT_PATH = 'data/labels.parquet'
+OUTPUT_PATH = 'data/features.parquet'
+```
+
+# Loading Dataset
+
+```{python}
+def load_data(path):
+    df = pd.read_parquet(path) 
+    return df
+```
+
+```{python}
+rides_df = load_data(INPUT_PATH)
+print(f'rides_df shape : {rides_df.shape}')
+rides_df.head()
+```
+
+# Feature engineering
+
+```{python}
+def feature_engineering(dataset):
+    dataset['Previous_day_demand'] = dataset.groupby(['Location'])['Demand'].shift(1)
+    dataset['Previous_week_demand'] = dataset.groupby(['Location'])['Demand'].shift(7)
+    dataset['Day_of_week'] = dataset['Date'].dt.dayofweek   
+    dataset['Day_of_month'] = dataset['Date'].dt.day
+    return dataset
+```
+
+```{python}
+features_df = feature_engineering(rides_df)
+print(f'features_df shape : {features_df.shape}')
+features_df.head()
+```
+
+# File saving
+
+```{python}
+def save_features(dataset, path):
+    features_df = dataset.to_parquet(path, index=False)
+```
+
+```{python}
+save_features(features_df, OUTPUT_PATH)
+```

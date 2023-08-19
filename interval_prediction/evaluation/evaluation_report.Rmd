@@ -1,0 +1,310 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+# Imports
+
+```{python}
+from IPython.display import display
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import warnings
+```
+
+# Configs
+
+```{python}
+BASE_PATH = "/Users/maedeh/Desktop/demand_project/demand_project/shoofer-demand-prediction/data/"
+
+LABELED_PATH = BASE_PATH + "labels_phase2.parquet"
+XGB_MODEL_PATH = BASE_PATH + "XGB_predictions_phase2.parquet"
+RIDGE_MODEL_PATH = BASE_PATH + "Ridge_predictions_phase2.parquet"
+RF_RIDGE_MODEL_PATH = BASE_PATH + "RF_ridge_predictions_phase2.parquet"
+
+SAVE_PLOT_PATH = BASE_PATH + 'pngs/'
+
+
+
+MODEL_LIST = ['BASELINE_LAST_WEEK', 'RIDGE_MODEL', 'XGB_MODEL', 'RF_RIDGE_MODEL']
+CATEGORIES = ['high_demand_locations', 'mid_demand_locations', 'low_demand_locations', 'all_locations']
+METRICS = ['MAPE', 'MAE', 'RMSE']
+BASED_ON = ['Location', 'Date', 'Hour_interval', 'Day_of_week']
+
+
+TEST_START_DATE = '2023-04-01'
+LAST_WEEK_TEST_START_DATE = '2023-03-25'
+
+
+NUM_INTERVAL_PER_DAY = 8
+HIGH_DEMAND_NUMS = 55
+MID_DEMAND_NUMS = 157
+NUM_LOC = 262
+SORT_METHOD = 'mean'
+
+
+
+warnings.filterwarnings('ignore')
+```
+
+```{python}
+report_dict = {cat:{met:{model:None for model in MODEL_LIST} for met in METRICS} for cat in CATEGORIES}
+predictions_dict = {model:None for model in MODEL_LIST}
+sorted_locations_dict={cat:None for cat in CATEGORIES}
+predictions_mean_error_dict={model:{based:{cat:None for cat in CATEGORIES} for based in BASED_ON} for model in MODEL_LIST}
+```
+
+# Load Data
+
+
+## Load labeled data
+
+```{python}
+labeled_df = pd.read_parquet(LABELED_PATH)
+print(labeled_df.shape)
+labeled_df.head()
+```
+
+```{python}
+test_df = labeled_df.loc[labeled_df['Date']>=TEST_START_DATE]
+test_df = test_df.reset_index(drop = True)
+print(test_df.shape)
+test_df.head()
+```
+
+## Load Predicted Data
+
+```{python}
+for model in MODEL_LIST:
+    if model != 'BASELINE_LAST_WEEK':
+        predictions_dict[model] = pd.read_parquet(eval(model + '_PATH'))
+        print(f"shape of {model} {predictions_dict[model].shape}")
+        display(predictions_dict[model].head())
+```
+
+### BaseLine Models
+
+```{python}
+def baseline_predict(dataset, shift_val):
+    baseline_test_df = dataset.loc[dataset['Date']>=LAST_WEEK_TEST_START_DATE]
+    baseline_test_df = baseline_test_df.reset_index(drop = True)
+    predicted_demand = baseline_test_df.groupby(['Location'])['Demand'].shift(shift_val)
+    predicted_data = pd.DataFrame(baseline_test_df[['Location', 'Date', 'Hour_interval']])
+    predicted_data['Predicted_demand'] = predicted_demand
+    predicted_data = predicted_data.dropna()
+    return predicted_data
+```
+
+```{python}
+predictions_dict['BASELINE_LAST_WEEK'] = baseline_predict(labeled_df, 7*NUM_INTERVAL_PER_DAY)
+print(predictions_dict['BASELINE_LAST_WEEK'].shape)
+predictions_dict['BASELINE_LAST_WEEK'].head()
+```
+
+### Join Predictions and Actual
+
+```{python}
+def join_actual_predict(actual_df, predicted_df):
+    for label,predictions_df in predicted_df.items():
+        if (predictions_df is not None):
+            actual_predicted_df = actual_df.merge(predictions_df, how='left', on=['Location', 'Date', 'Hour_interval'])
+            actual_predicted_df['Date'] = pd.to_datetime(actual_predicted_df['Date'])
+            actual_predicted_df['Day_of_week'] = actual_predicted_df['Date'].dt.dayofweek
+            predictions_dict[label] = actual_predicted_df
+```
+
+```{python}
+join_actual_predict(test_df,predictions_dict)
+for model in MODEL_LIST:
+    print(f"shape of predictions_dict[{model}]: {predictions_dict[model].shape}")
+    display(predictions_dict[model].head())
+```
+
+### Sort Locations by Demand
+
+```{python}
+def sort_locations_on_demand(predictions_dict,sorted_locations_dict):
+    predictions_df = predictions_dict['BASELINE_LAST_WEEK']
+    if (predictions_df is not None):
+        sorted_index = predictions_df.groupby(['Location','Hour_interval'])['Demand'].aggregate([SORT_METHOD]).sort_values(SORT_METHOD, ascending=False)
+        sorted_index = sorted_index.reset_index()
+        sorted_locations_dict['high_demand_locations'] = sorted_index[:HIGH_DEMAND_NUMS]
+        sorted_locations_dict['mid_demand_locations'] = sorted_index[HIGH_DEMAND_NUMS:MID_DEMAND_NUMS+HIGH_DEMAND_NUMS]
+        sorted_locations_dict['low_demand_locations'] = sorted_index[MID_DEMAND_NUMS+HIGH_DEMAND_NUMS:]
+        sorted_locations_dict['all_locations'] = sorted_index
+        
+```
+
+```{python}
+sort_locations_on_demand(predictions_dict, sorted_locations_dict)
+for cat in CATEGORIES:
+    print(f"shape of sorted_locations_dict[{cat}]: {sorted_locations_dict[cat].shape}")
+    display(sorted_locations_dict[cat].head())
+```
+
+# Mean error Calculation
+
+
+### Error Columns
+
+```{python}
+def calculate_error(actual_predicted_dict: dict):
+    for label,actual_predicted_df in actual_predicted_dict.items():
+        if (actual_predicted_df is not None):
+            
+            actual_predicted_df['error'] = np.abs(
+                actual_predicted_df['Demand']-actual_predicted_df['Predicted_demand']
+                )
+            
+            actual_predicted_df['squared_error'] = np.square(
+                actual_predicted_df['Demand']-actual_predicted_df['Predicted_demand']
+                )
+            
+            actual_Demand_df = np.where(actual_predicted_df['Demand']==0, 1, actual_predicted_df['Demand'])
+            # actual_Demand_df = actual_predicted_df['Demand']+1
+            actual_predicted_df['percentage_error'] = (
+                actual_predicted_df['error']/actual_Demand_df
+                )*100
+            
+```
+
+```{python}
+calculate_error(predictions_dict)
+for model in MODEL_LIST:
+    print(f"shape of predictions_dict[{model}]: {predictions_dict[model].shape}")
+    display(predictions_dict[model].head())
+```
+
+### Aggregate Error Columns
+
+```{python}
+def calculate_mean_error(actual_predicted_dict: dict, predictions_mean_dict: dict):
+    for model,actual_predicted_df in actual_predicted_dict.items():
+        if (actual_predicted_df is not None):
+            for cat in CATEGORIES:
+                sorted_locations = sorted_locations_dict[cat]
+                categorized_df = actual_predicted_df.merge(sorted_locations[['Location', 'Hour_interval']], on=['Location','Hour_interval'])
+                for per in BASED_ON:
+                    categorized_error_df = categorized_df[[per,'Demand','error','squared_error', 'percentage_error']]
+                    categorized_mean_df = (
+                        categorized_error_df.groupby(per).agg(mape=('percentage_error','mean'),
+                                                              mae=('error','mean'),
+                                                              mse=('squared_error','mean'),
+                                                              demand_mean=('Demand','mean'))
+                                                              ) 
+                    categorized_mean_df['rmse'] = np.sqrt(categorized_mean_df['mse'])
+                    categorized_mean_df.drop(columns='mse', inplace=True)
+                    categorized_mean_df['mape'] = np.where(categorized_mean_df['mape']>100, 100, categorized_mean_df['mape'])
+                    if per == 'Location':
+                        loc_demand_index = sorted_locations.groupby(['Location'])[SORT_METHOD].sum().sort_values(ascending=False).index
+                        categorized_mean_df = categorized_mean_df.reindex(loc_demand_index)
+                    if per == 'Hour_interval':
+                        hour_demand_index = sorted_locations.groupby(['Hour_interval'])[SORT_METHOD].sum().sort_values(ascending=False).index
+                        categorized_mean_df = categorized_mean_df.reindex(hour_demand_index)
+            
+                    predictions_mean_dict[model][per][cat] = categorized_mean_df.reset_index()
+                        
+
+```
+
+```{python}
+calculate_mean_error(predictions_dict, predictions_mean_error_dict)
+for model in MODEL_LIST:
+    for per in BASED_ON:
+        for cat in CATEGORIES:
+            print(f"shape of predictions_mean_dict[{model}][{per}][{cat}]: {predictions_mean_error_dict[model][per][cat].shape}")
+            display(predictions_mean_error_dict[model][per][cat].head())
+```
+
+### Plot Mape for Models Predicted Demands
+
+```{python}
+def plot(predictions_mean_dict, per):
+    
+    fig, axes = plt.subplots(nrows=len(CATEGORIES)*len(METRICS), ncols=1, figsize=(15,30))
+    for i, met in enumerate(METRICS):
+        for j, cat in enumerate(CATEGORIES):
+            for model,mean_df in predictions_mean_dict.items():
+                categorized_demand_df = mean_df[per][cat]
+                if (categorized_demand_df is not None):
+                    categorized_demand_df[per] = categorized_demand_df[per].astype(str)
+                    categorized_demand_df.plot(x=per,y=met.lower(),kind='line',marker='.',ax = axes[len(CATEGORIES)*i+j],label=model)            
+    
+            axes[len(CATEGORIES)*i+j].set_title('Models '+met+' for '+str(HIGH_DEMAND_NUMS)+' '+ cat, bbox=dict( alpha=0.5)) 
+            axes[len(CATEGORIES)*i+j].legend(loc='upper left', bbox_to_anchor=(1, 1))
+    plt.tight_layout()
+    plt.show()
+    # plot_name = SAVE_PLOT_PATH + 'MAPE_plot per '+per+'.svg'
+    # plt.savefig(plot_name, format='svg', dpi=1200)  
+
+```
+
+```{python}
+plot(predictions_mean_error_dict, 'Location')
+```
+
+```{python}
+plot(predictions_mean_error_dict, 'Date')
+```
+
+```{python}
+plot(predictions_mean_error_dict, 'Hour_interval')
+```
+
+```{python}
+plot(predictions_mean_error_dict, 'Day_of_week')
+```
+
+# Table of Results
+
+```{python}
+def create_table_errors(predictions_dict, report_dict):
+    for model, error_df in predictions_dict.items():
+        for cat in CATEGORIES:
+            if error_df is not None:
+                sorted_index = sorted_locations_dict[cat][['Location', 'Hour_interval']]
+                categorized_df = error_df.merge(sorted_index, on=['Location','Hour_interval'])
+                
+                report_dict[cat]['MAE'][model] = categorized_df['error'].mean()            
+                report_dict[cat]['RMSE'][model] = np.sqrt(categorized_df['squared_error'].mean())
+                report_dict[cat]['MAPE'][model] = categorized_df['percentage_error'].mean()
+
+    return report_dict
+```
+
+```{python}
+report_dict = create_table_errors(predictions_dict, report_dict)
+report_df = pd.DataFrame.from_dict({(i,j): report_dict[i][j] 
+                            for i in report_dict.keys() 
+                            for j in report_dict[i].keys()},
+                            orient='index')
+
+report_df.index = pd.MultiIndex.from_tuples(report_df.index)
+report_df = report_df.T
+```
+
+```{python}
+df = pd.DataFrame(report_df,
+                  index=pd.Index(MODEL_LIST),
+                  columns=pd.MultiIndex.from_product([CATEGORIES, METRICS], names=['location CATEGORIES:', 'Error Metrics:']))
+
+```
+
+```{python}
+df.style.format('{:.2f}')
+```
+
+```{python}
+
+```

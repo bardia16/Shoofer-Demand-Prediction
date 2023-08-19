@@ -1,0 +1,247 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="kEr9J20VzxOq", outputId="b88a69f2-0a15-4bfc-a660-a7a3bf9ad751"}
+from math import sqrt
+from pmdarima.arima import ARIMA
+from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pmdarima as pm
+import warnings
+```
+
+```{python}
+warnings.filterwarnings("ignore")
+```
+
+<!-- #region id="KzcJPH0e1BE6" -->
+# imports
+<!-- #endregion -->
+
+<!-- #region id="uEOhGFuj2J3p" -->
+# loading Dataset
+<!-- #endregion -->
+
+```{python}
+INPUT_PATH = '/Users/maedeh/Desktop/demand_project/shoofer-demand-prediction/data/labels.parquet'
+OUTPUT_PATH = '/Users/maedeh/Desktop/demand_project/shoofer-demand-prediction/data/arima_predict.parquet'
+```
+
+```{python id="xLg8mI4Yr8Zc"}
+def load_data(path):
+    dataset = pd.read_parquet(path, engine = 'pyarrow') 
+    return dataset
+```
+
+```{python}
+rides_df = load_data(INPUT_PATH)
+rides_df.head()
+```
+
+# aggregating_labels 
+
+```{python}
+def aggregating_labels(rides_df):
+    loc_ts={}
+    demand=[]
+    pre_Location=1
+    
+    for i in range(len(rides_df)):
+        
+      if rides_df.Location[i]!=pre_Location:
+        loc_ts[f'LocationID_{pre_Location}']=demand
+        demand=[]
+          
+      demand.append(rides_df.Demand[i])
+      pre_Location = rides_df.Location[i]
+        
+    loc_ts[f'LocationID_{pre_Location}'] = demand
+    location_labels_df = pd.DataFrame(loc_ts)
+    
+    return location_labels_df
+```
+
+```{python}
+location_labels_df = aggregating_labels(rides_df)
+print(f'location_labels_df shape : {location_labels_df.shape}')
+location_labels_df.head()
+```
+
+<!-- #region id="7fgxL33c7yRz" -->
+# ARIMA MODEL
+<!-- #endregion -->
+
+<!-- #region id="Ty2gmgJ3Yuig" -->
+## train 
+<!-- #endregion -->
+
+```{python id="HafiobWpYqiK"}
+train_size_ratio = 0.12
+```
+
+```{python id="QWWSsvJwVWaR"}
+def split_data(location_labels_df, location, train_size_ratio):
+    size = int(len(location_labels_df) * train_size_ratio)
+    train_data = location_labels_df.loc[0:size, location]
+    test_data = location_labels_df.loc[size:, location]
+    return (train_data, test_data)
+```
+
+```{python id="jbk1N0pkxIPy"}
+def arima_forecast(train_data, test_data):
+    history = [x for x in train_data]
+    predictions = []
+    model = pm.arima.auto_arima(
+                              history, start_p=1, start_q=1,
+                              test='kpss', max_p=8, max_q=8,
+                              seasonal=False, m=1,
+                              d=None, start_P=0,
+                              suppress_warnings=False, trace=False)
+    for t in range(len(test_data)):
+        best_arima_model_fit = pm.arima.ARIMA(order=model.get_params().get("order")).fit(history)
+        output = best_arima_model_fit.predict(n_periods=1)
+        yhat = output[0]
+        predictions.append(int(yhat))
+        obs = test_data.iloc[t]
+        history.append(obs)
+    
+    test_data = test_data.reset_index()
+    return (test_data.iloc[:,1], predictions, best_arima_model_fit.fittedvalues())
+
+```
+
+<!-- #region id="SllaVhLm3UCg" -->
+### train and predict for all locationIDs
+
+<!-- #endregion -->
+
+```{python id="SqRKbhM_rgY8"}
+def rmse(test_data, predictions):
+  rmse = sqrt(mean_squared_error(test_data, predictions))
+  return rmse
+```
+
+```{python id="gD4cUUg1rlUd"}
+def mape(test_data, predictions):
+  mape = mean_absolute_percentage_error(test_data, predictions)
+  return mape
+```
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="qMqwNRrNH6YE", outputId="382f9add-f885-4cef-a464-8f7aef0c34d8"}
+def predict_all_location(location_labels_df, train_size_ratio):
+
+    all_loc_rmse = []
+    all_loc_mape = []
+    predicted_data_all_loc = {}
+    test_data_all_loc = {}
+    fitted_data_all_loc = {}
+    column = location_labels_df.columns
+    
+    for loc in column:
+        
+        train_data, test_data = split_data (location_labels_df, loc, train_size_ratio)
+        result = arima_forecast(train_data, test_data)
+                
+        test_data_all_loc[loc] = result[0]
+        predicted_data_all_loc[loc] = result[1]
+        fitted_data_all_loc[loc] = result[2]
+        
+        val_rmse = rmse (result[0], result[1])
+        val_mape = mape (result[0], result[1])
+        all_loc_rmse.append(val_rmse)
+        all_loc_mape.append(val_mape)
+    
+    all_loc_rmse = pd.DataFrame(all_loc_rmse, index=column , columns= ['rmse'])
+    all_loc_mape = pd.DataFrame(all_loc_mape, index=column , columns= ['mape'])
+    all_loc_rmse = pd.DataFrame(all_loc_rmse)
+    all_loc_mape = pd.DataFrame(all_loc_mape)
+    test_data_all_loc = pd.DataFrame(test_data_all_loc)
+    fitted_data_all_loc = pd.DataFrame(fitted_data_all_loc)
+    predicted_data_all_loc = pd.DataFrame(predicted_data_all_loc)
+    return (test_data_all_loc, predicted_data_all_loc, fitted_data_all_loc, all_loc_rmse, all_loc_mape)
+```
+
+```{python}
+test_data_all_loc, predicted_data_all_loc, fitted_data_all_loc, all_loc_rmse, all_loc_mape = predict_all_location(location_labels_df, train_size_ratio)
+```
+
+```{python}
+print(f'predicted_data_all_loc shape : {predicted_data_all_loc.shape}')
+predicted_data_all_loc.head()
+```
+
+<!-- #region id="t9TmKfCS3Fpx" -->
+## evaluation
+<!-- #endregion -->
+
+### plots
+
+```{python}
+def plot_high_demand_error(all_loc_rmse,all_loc_mape):
+    plt.rcParams['figure.figsize'] = (50, 30)
+    index_high_demand = location_labels_df.sum().sort_values(ascending=False).index[:51]
+    
+    plt.subplot(2,1,1)
+    plt.plot(all_loc_rmse.loc[index_high_demand], linewidth=6)
+    plt.title('RMSE of High Demand LocationID', fontsize=45)
+    plt.ylabel('rmse', fontsize=35)
+    plt.xlabel('LocationID', fontsize=35)
+    plt.xticks(range(1,52), list(index_high_demand), rotation=45)
+    plt.tick_params(axis='both', labelsize=25)
+    
+    
+    plt.subplot(2,1,2)
+    plt.plot(all_loc_mape.loc[index_high_demand], color='orange', linewidth=6)
+    plt.title('MAPE of High Demand LocationID', fontsize=45)
+    plt.ylabel('mape', fontsize=35)
+    plt.xlabel('LocationID', fontsize=35)
+    plt.xticks(range(1,52), list(index_high_demand), rotation=45)
+    plt.tick_params(axis='both', labelsize=25)
+    plt.tight_layout()
+    
+    plt.show()
+```
+
+```{python}
+plot_high_demand_error(all_loc_rmse, all_loc_mape)
+```
+
+```{python}
+def evaluation(test_data_all_loc, predicted_data_all_loc):
+    index_high_demand = location_labels_df.sum().sort_values(ascending=False).index[:51]
+    predicted_data_vec = predicted_data_all_loc[index_high_demand].to_numpy().reshape((1,-1))
+    test_data_vec = test_data_all_loc[index_high_demand].to_numpy().reshape((1,-1))
+    mape_error = mape(test_data_vec,predicted_data_vec)
+    rmse_error = rmse(test_data_vec,predicted_data_vec)
+    print(f'mape of high demand locations: {mape_error}')
+    print(f'rmse of high demand locations: {rmse_error}')
+```
+
+```{python}
+evaluation(test_data_all_loc, predicted_data_all_loc)
+```
+
+# Save file
+
+```{python}
+def save_val_predicted(dataset, path):
+    labels_df = dataset.to_parquet(path, index=False)
+```
+
+```{python}
+save_val_predicted(predicted_data_all_loc, OUTPUT_PATH)
+```

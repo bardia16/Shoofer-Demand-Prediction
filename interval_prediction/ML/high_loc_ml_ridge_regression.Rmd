@@ -1,0 +1,406 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+<!-- #region id="8UTIGpTZZlOO" -->
+# Imports
+<!-- #endregion -->
+
+```{python id="AnwSHO1L97I5"}
+from itertools import product
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
+from sklearn.model_selection import GridSearchCV
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import warnings
+```
+
+```{python}
+warnings.filterwarnings('ignore')
+```
+
+<!-- #region id="pSSMa3G2wGmF" -->
+# Configs
+<!-- #endregion -->
+
+```{python id="zIkDLK9zwGmG"}
+INPUT_PATH = '/Users/maedeh/Desktop/demand_project/demand_project/shoofer-demand-prediction/data/features_df_phase2.parquet'
+OUTPUT_PATH = '/Users/maedeh/Desktop/data/Ridge_predictions_loc_phase2.parquet'
+
+
+FEATURE_LIST = ['day_of_week',
+                'day_of_month',
+
+                'max_previous_week_interval',
+                'max_previous_7exact_interval',
+    
+                'previous_day_9interval',
+                'previous_day_10interval',
+                'previous_day_14interval',
+                'previous_day_15interval',
+                'previous_day_17interval',
+
+                'avrg_previous_2day_8interval',
+                
+                'diff_previous_2day_interval',
+                'diff_previous_2day_previous_interval',
+    
+                'previous_day_interval',
+                'previous_2day_interval',
+                'previous_3day_interval',
+                'previous_4day_interval',
+                'previous_5day_interval',
+                'previous_6day_interval',
+                'previous_week_interval',
+                'previous_8day_interval',
+                'previous_9day_interval',
+                'previous_10day_interval',
+                'previous_11day_interval',
+                'previous_12day_interval',
+                'previous_13day_interval',
+                'previous_2week_interval'
+               ]
+
+
+TEST_START_DATE = '2023-04-1'
+VALIDATION_START_DATE = '2023-03-18'
+
+NUM_INTERVAL_PER_DAY = 8
+HIGH_DEMAND_NUMS = 55
+SORT_METHOD = 'mean'
+```
+
+<!-- #region id="5eS5BQE9wGmK" -->
+# Data preparation
+
+<!-- #endregion -->
+
+<!-- #region id="TWsjXbpaznc_" -->
+## Load Data
+<!-- #endregion -->
+
+```{python id="87BFHUu1-z73"}
+features_df = pd.read_parquet(INPUT_PATH, engine='pyarrow')
+print(f'rfeatures dataframe shape : {features_df.shape}')
+features_df.head()
+```
+
+## Add feature
+
+```{python}
+def add_feature(dataset, lag_num):
+    
+    for i in range(1,lag_num):
+        if i not in(1,7):
+            dataset[f'previous_{i}day_interval'] = dataset.groupby('Location')['Demand'].shift(i*NUM_INTERVAL_PER_DAY)
+
+    
+    dataset['day_of_week'] = dataset['Date'].dt.dayofweek
+    dataset['day_of_month'] = dataset['Date'].dt.day
+    dataset['time'] = dataset['Hour_interval']
+    dataset['zone'] = dataset['Location']
+
+    
+    dataset['max_previous_week_interval'] = dataset.groupby('Location')['Demand'].rolling(window = 7*NUM_INTERVAL_PER_DAY).max().reset_index(drop=True)
+    dataset['max_previous_2week_interval'] = dataset.groupby('Location')['Demand'].rolling(window = 14*NUM_INTERVAL_PER_DAY).max().reset_index(drop=True)
+
+    
+    df = dataset.sort_values(['Location','Hour_interval','Date'])[['Location','Hour_interval','Date','Demand']]
+    df['max_previous_7exact_interval'] = dataset.groupby(['Location','Hour_interval'])['Demand'].rolling(window = 7).max().values
+    dataset['max_previous_7exact_interval'] = df.sort_values(['Location', 'Date','Hour_interval'])['max_previous_7exact_interval']
+    df['max_previous_14exact_interval'] = dataset.groupby(['Location','Hour_interval'])['Demand'].rolling(window = 14).max().values
+    dataset['max_previous_14exact_interval'] = df.sort_values(['Location', 'Date','Hour_interval'])['max_previous_14exact_interval']
+
+    
+    dataset['previous_day_9interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+1)
+    dataset['previous_day_10interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+2)
+    dataset['previous_day_11interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+3)
+    dataset['previous_day_12interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+4)
+    dataset['previous_day_13interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+5)
+    dataset['previous_day_14interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+6)
+    dataset['previous_day_15interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+7)
+    dataset['previous_day_17interval'] = dataset.groupby('Location')['Demand'].shift(NUM_INTERVAL_PER_DAY+9)
+
+    
+    dataset['avrg_previous_2day_8interval'] = (8*dataset['previous_day_9interval']+7*dataset['previous_day_10interval']+\
+    6*dataset['previous_day_11interval']+5*dataset['previous_day_12interval']+4*dataset['previous_day_13interval']+\
+    3*dataset['previous_day_14interval']+2*dataset['previous_day_15interval']+dataset['previous_2week_interval'])/NUM_INTERVAL_PER_DAY
+
+    
+    dataset['diff_previous_2day_previous_interval'] = dataset['previous_day_17interval']-dataset['previous_day_9interval']
+
+    
+    dataset['diff_previous_2day_interval'] = dataset['previous_day_interval']-dataset['previous_2day_interval']
+    dataset['diff_previous_2week_interval'] = dataset['previous_week_interval']-dataset['previous_2week_interval']
+
+    
+    return dataset
+
+
+```
+
+```{python}
+new_features_df = add_feature(features_df, lag_num = 14)
+print(f'new features dataframe shape : {new_features_df.shape}')
+new_features_df.head()
+```
+
+```{python}
+def feature_selection(dataset, FEATURE_LIST):
+    dataset = dataset[['Location','Date','Hour_interval','Demand']+FEATURE_LIST]
+    dataset.dropna(inplace = True)
+    return dataset
+```
+
+```{python}
+selected_features_df = feature_selection(new_features_df, FEATURE_LIST)
+print(f'selected features dataframe shape : {selected_features_df.shape}')
+selected_features_df.head()
+```
+
+<!-- #region id="zN0kp6jw03DP" -->
+## Split Train and Test Data
+<!-- #endregion -->
+
+```{python}
+def high_demand_split(dataset):
+    high_index = dataset.groupby(['Location'])['Demand'].aggregate([SORT_METHOD]).sort_values(SORT_METHOD,ascending=False).reset_index()
+    high_demand_df = dataset[dataset['Location'].isin(high_index['Location'][:HIGH_DEMAND_NUMS])]
+    return high_demand_df
+```
+
+```{python}
+High_demand_df = high_demand_split(selected_features_df)
+print(f'High_demand_selected_feature dataframe shape : {High_demand_df.shape}')
+High_demand_df.head()
+```
+
+```{python}
+def high_demand_split(dataset):
+    high_index = dataset.groupby(['Location'])['Demand'].aggregate([SORT_METHOD]).sort_values(SORT_METHOD,ascending=False).reset_index()
+    high_loc_df = dataset[dataset['Location'].isin(high_index['Location'][:HIGH_DEMAND_NUMS])]
+    high_loc_hour_df = high_loc_df[~high_loc_df['Hour_interval'].isin([3,6])]
+    high_loc_hour_df = high_loc_hour_df.groupby(['Location','Hour_interval']).agg(Min=('Demand','min')).sort_values(by='Min',ascending=False).reset_index()
+    high_demand_df = dataset.merge(high_loc_hour_df[['Location','Hour_interval']], on=['Location','Hour_interval'])
+    return high_demand_df
+```
+
+```{python}
+High_demand_df = high_demand_split(selected_features_df)
+print(f'High_demand_selected_feature dataframe shape : {High_demand_df.shape}')
+High_demand_df.head()
+```
+
+```{python id="CMY1G1lmwGmI"}
+def train_test_splitting(dataset, START_DATE):
+
+    train_df = dataset[dataset['Date'] < START_DATE]
+    test_df = dataset[dataset['Date'] >= START_DATE]
+
+    return train_df, test_df
+```
+
+```{python id="3xH4VMGNwGmK"}
+train_df, test_df = train_test_splitting(High_demand_df, TEST_START_DATE)
+```
+
+```{python id="xxGdRZfqwGmL", outputId="58609337-c472-48f5-c7fc-e9d7c17aba4f"}
+print(f'train dataframe shape : {train_df.shape}')
+train_df.tail()
+```
+
+```{python id="uPbINwH224Hy"}
+print(f'test dataframe shape : {test_df.shape}')
+test_df.head()
+```
+
+```{python id="3xH4VMGNwGmK"}
+gridsearch_train_df, validation_df = train_test_splitting(train_df, VALIDATION_START_DATE)
+```
+
+```{python id="uPbINwH224Hy"}
+print(f'gridsearch_train dataframe shape : {gridsearch_train_df.shape}')
+gridsearch_train_df.head()
+```
+
+```{python id="uPbINwH224Hy"}
+print(f'validation dataframe shape : {validation_df.shape}')
+validation_df.head()
+```
+
+<!-- #region id="xf8ChW_7wGmL" -->
+# Model Training
+<!-- #endregion -->
+
+<!-- #region id="PxYfxyCHz_Z3" -->
+## **Ridge Regression**
+<!-- #endregion -->
+
+<!-- #region id="CJn4YIBtKcL_" -->
+### Model Tuning
+<!-- #endregion -->
+
+```{python id="sOMPo5ryBm8g"}
+def grid_search(test_parameters, train_data, validation_data, feature_list = FEATURE_LIST):
+    best_score = float('inf')
+    best_params = None
+    param_combination = product(*test_parameters.values())
+    for param in param_combination:
+        param_dict = dict(zip(test_parameters.keys(), param))
+        model = Ridge(**param_dict)
+        model.fit(train_data[feature_list], train_data['Demand'])
+        validation_predict_df = model.predict(validation_data[feature_list])
+        score = mean_squared_error(validation_data['Demand'], validation_predict_df)
+        if score<best_score:
+            best_score = score
+            best_params = param_dict
+    return best_params, best_score
+```
+
+```{python}
+model = Ridge()
+best_params, best_score = grid_search(
+    {'alpha':[80000,100000,500000]},
+    gridsearch_train_df, 
+    validation_df, 
+    feature_list = FEATURE_LIST
+    )
+
+print(best_params, best_score)
+```
+
+<!-- #region id="AxN2E_9Q1yHS" -->
+### Prediction
+<!-- #endregion -->
+
+```{python id="pbhM5Oe6PjW7"}
+def model_predict(model, train_data, test_data, feature_list):
+
+    model.fit(train_data[feature_list], train_data['Demand'])
+
+
+    train_predict_df  = model.predict(train_data[feature_list])
+    test_predict_df  = model.predict(test_data[feature_list])
+
+    return train_predict_df, test_predict_df
+```
+
+```{python id="MulwYZc7LK7v"}
+model = Ridge(**best_params)
+train_prediction_df , test_prediction_df  = model_predict(model, train_df, test_df, FEATURE_LIST)
+```
+
+<!-- #region id="jJYHtg2oRqvS" -->
+### Visualization
+<!-- #endregion -->
+
+```{python id="ao6nw8xsRvB9"}
+def prediction_visualization(train_data, test_data, train_prediction_df, test_prediction_df):
+
+
+    predicted_train_df = train_data
+    predicted_test_df = test_data
+    predicted_train_df['Predicted'] = train_prediction_df
+    predicted_test_df['Predicted'] = test_prediction_df
+
+    train_data = train_data.groupby(['Date','Hour_interval'])['Demand'].sum()
+    test_data = test_data.groupby(['Date','Hour_interval'])['Demand'].sum()
+    predicted_train_df = predicted_train_df.groupby(['Date','Hour_interval'])['Predicted'].sum()
+    predicted_test_df = predicted_test_df.groupby(['Date','Hour_interval'])['Predicted'].sum()
+
+    plt.figure(figsize=(30,10))
+    plt.title('Train', fontsize = 30)
+    plt.plot(range(1,len(train_data)+1), train_data)
+    plt.plot(range(1,len(train_data)+1), predicted_train_df)
+    plt.xlabel('time interval', fontsize = 15)
+    plt.legend(["Real Value", "Predicted"], loc ="lower right", fontsize = 15)
+    plt.show()
+
+    plt.figure(figsize=(30,10))
+    plt.title('Test', fontsize = 30)
+    plt.plot(range(1,len(test_data)+1), test_data)
+    plt.plot(range(1,len(test_data)+1), predicted_test_df)
+    plt.xlabel('time interval', fontsize = 15)
+    plt.legend(["Real Value", "Predicted"], loc ="lower right", fontsize = 15)
+    plt.show()
+```
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 887}, id="gOyNantNRtda", outputId="dc7796cf-c196-421d-bd56-1d312334dee4"}
+prediction_visualization(train_df, test_df, train_prediction_df, test_prediction_df)
+```
+
+<!-- #region id="RBsqB5hnSuPP" -->
+### Evaluation
+<!-- #endregion -->
+
+```{python id="BcGvcilUWEEC"}
+def evaluate(metric, metric_name, true_values, predicted_values):
+    print(f'{metric_name} : {metric(true_values, predicted_values)}')
+```
+
+```{python id="v4-GWghuSbnA"}
+def evaluation(model_name, train_data, test_data, train_prediction_df, test_prediction_df):
+    print(f'{model_name} train scores:')
+
+
+    evaluate(mean_absolute_error, 'MAE', train_data['Demand'], train_prediction_df)
+    evaluate(mean_squared_error, 'MSE', train_data['Demand'], train_prediction_df)
+    evaluate(mean_absolute_percentage_error, 'MAPE', train_data['Demand'], train_prediction_df)
+
+    print(f'{model_name} test scores:')
+
+    evaluate(mean_absolute_error, 'MAE', test_data['Demand'], test_prediction_df)
+    evaluate(mean_squared_error, 'MSE', test_data['Demand'], test_prediction_df)
+    evaluate(mean_absolute_percentage_error, 'MAPE', test_data['Demand'], test_prediction_df)
+
+```
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="vUBqNgIwSwKe", outputId="c05d64b8-b525-458d-96db-757e94a57d89"}
+evaluation('Ridge Regression', train_df, test_df, train_prediction_df, test_prediction_df)
+```
+
+# File Saving
+
+```{python}
+def save_predictions(dataset, path):
+    dataset.to_parquet(path, index=False)
+```
+
+```{python}
+def prediction_labeling(pred_df, labeled_df):
+    pred_df = pd.DataFrame(pred_df, columns = ['Predicted_demand'])
+    labeled_df.reset_index(inplace = True)
+    labeled_prediction_df = labeled_df[['Location', 'Date','Hour_interval']]
+    labeled_prediction_df['Predicted_demand'] = pred_df
+    return labeled_prediction_df
+```
+
+```{python}
+labeled_prediction_df = prediction_labeling(test_prediction_df, test_df)
+```
+
+```{python}
+print(f'labeled prediction dataframe shape : {labeled_prediction_df.shape}')
+labeled_prediction_df.head()
+```
+
+```{python}
+save_predictions(labeled_prediction_df, OUTPUT_PATH)
+```
+
+```{python}
+
+```
